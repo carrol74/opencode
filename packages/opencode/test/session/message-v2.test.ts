@@ -320,6 +320,10 @@ describe("session.message-v2.toModelMessage", () => {
   })
 
   test("converts assistant tool completion into tool-call + tool-result messages with attachments", async () => {
+    const selected = {
+      ...model,
+      capabilities: { ...model.capabilities, input: { ...model.capabilities.input, image: true } },
+    }
     const userID = "m-user"
     const assistantID = "m-assistant"
 
@@ -371,7 +375,7 @@ describe("session.message-v2.toModelMessage", () => {
       },
     ]
 
-    expect(await MessageV2.toModelMessages(input, model)).toStrictEqual([
+    expect(await MessageV2.toModelMessages(input, selected)).toStrictEqual([
       {
         role: "user",
         content: [{ type: "text", text: "run tool" }],
@@ -409,6 +413,99 @@ describe("session.message-v2.toModelMessage", () => {
         ],
       },
     ])
+  })
+
+  test.each(
+    [
+      { npm: "@ai-sdk/anthropic", id: "text-model" },
+      { npm: "@ai-sdk/openai", id: "text-model" },
+      { npm: "@ai-sdk/amazon-bedrock/mantle", id: "text-model" },
+      { npm: "@ai-sdk/amazon-bedrock", id: "anthropic.text-model" },
+      { npm: "@ai-sdk/google-vertex/anthropic", id: "text-model" },
+      { npm: "@ai-sdk/xai", id: "text-model" },
+      { npm: "@ai-sdk/google", id: "gemini-3-text-model" },
+    ].flatMap((api) => [false, true].map((image) => ({ ...api, image }))),
+  )("handles tool images for $npm with image=$image", async (scenario) => {
+    const selected = {
+      ...model,
+      api: { ...model.api, npm: scenario.npm, id: scenario.id },
+      capabilities: {
+        ...model.capabilities,
+        input: { ...model.capabilities.input, image: scenario.image },
+      },
+    }
+    const input: SessionV1.WithParts[] = [
+      {
+        info: userInfo("m-user-image"),
+        parts: [{ ...basePart("m-user-image", "u1"), type: "text", text: "read image" }] as SessionV1.Part[],
+      },
+      {
+        info: assistantInfo("m-assistant-image", "m-user-image"),
+        parts: [
+          {
+            ...basePart("m-assistant-image", "a1"),
+            type: "tool",
+            callID: "call-image",
+            tool: "read",
+            state: {
+              status: "completed",
+              input: { filePath: "/tmp/image.png" },
+              output: "Image read successfully",
+              title: "Read",
+              metadata: {},
+              time: { start: 0, end: 1 },
+              attachments: [
+                {
+                  ...basePart("m-assistant-image", "file1"),
+                  type: "file",
+                  mime: "image/png",
+                  filename: "image.png",
+                  url: "data:image/png;base64,Zm9v",
+                },
+              ],
+            },
+          },
+        ] as SessionV1.Part[],
+      },
+    ]
+    const original = structuredClone(input)
+    const result = ProviderTransform.message(await MessageV2.toModelMessages(input, selected), selected, {})
+    expect(input).toEqual(original)
+    if (!scenario.image) {
+      expect(result).toHaveLength(4)
+      expect(result[2]).toMatchObject({
+        role: "tool",
+        content: [{ type: "tool-result", output: { type: "text", value: "Image read successfully" } }],
+      })
+      expect(result[3]).toMatchObject({
+        role: "user",
+        content: [
+          { type: "text" },
+          {
+            type: "text",
+            text: 'ERROR: Cannot read "image.png" (this model does not support image input). Inform the user.',
+          },
+        ],
+      })
+      expect(JSON.stringify(result)).not.toContain("Zm9v")
+      return
+    }
+    expect(result).toHaveLength(3)
+    expect(result[2]).toMatchObject({
+      role: "tool",
+      content: [
+        {
+          type: "tool-result",
+          output: {
+            type: "content",
+            value: [
+              { type: "text", text: "Image read successfully" },
+              { type: "media", mediaType: "image/png", data: "Zm9v" },
+            ],
+          },
+        },
+      ],
+    })
   })
 
   test("preserves jpeg tool-result media for anthropic models", async () => {
